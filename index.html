@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14213d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Losuj">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+<title>Losuj playlistę</title>
+</head>
+<body>
+<main>
+  <h1>Prawdziwe losowanie</h1>
+  <p class="lead">Mieszam Twoją playlistę uczciwie matematycznie i od razu włączam wynik w Spotify. Sama playlista zostaje nietknięta.</p>
+  <section id="login" hidden><button id="loginBtn">Zaloguj przez Spotify</button></section>
+  <section id="app" hidden>
+    <label for="pl">Playlista</label>
+    <select id="pl"></select>
+    <button id="go" class="big">Losuj i graj</button>
+  </section>
+  <p id="msg" role="status"></p>
+</main>
+<script src="app.js?v=4"></script>
+</body>
+</html>
