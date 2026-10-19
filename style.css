@@ -9,7 +9,7 @@ label{display:block;margin-bottom:.4rem;color:var(--mut)}
 select,button{width:100%;font:inherit;border:0;border-radius:14px;padding:.9rem 1rem}
 select{background:var(--card);color:var(--tx);margin-bottom:1.25rem}
 button{background:var(--card);color:var(--tx);cursor:pointer}
-button.big{background:var(--ac);color:#14213d;font-weight:700;font-size:1.35rem;padding:1.5rem 1rem}
+button.big{background:var(--ac);color:#145a32;font-weight:700;font-size:1.35rem;padding:1.5rem 1rem}
 button:disabled{opacity:.6}
 button:focus-visible,select:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
 #msg{margin-top:1.25rem;color:var(--mut);min-height:3rem}
