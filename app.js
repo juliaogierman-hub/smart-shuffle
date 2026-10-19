@@ -8,7 +8,7 @@ const TRACK_URI = /^spotify:track:[A-Za-z0-9]{22}$/;
 const $ = id => document.getElementById(id);
 const say = t => { $('msg').textContent = t; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const LOG = [], NAMES = {};
+const LOG = [], NAMES = {}, TRACKS = {};
 const log = m => { LOG.push(new Date().toISOString().slice(11, 23) + ' ' + m); if (LOG.length > 400) LOG.shift(); };
 window.addEventListener('error', e => log('BŁĄD STRONY: ' + e.message));
 window.addEventListener('unhandledrejection', e => log('ODRZUCONA OBIETNICA: ' + (e.reason?.message || e.reason)));
@@ -164,7 +164,7 @@ async function loadTracks(id) {
     if (!Array.isArray(j?.items)) throw new Error('Spotify nie zwrócił utworów playlisty w polu "items".');
     for (const it of j.items) {
       const t = it?.item || it?.track;        // po zmianach z 2026 pole nazywa się "item"
-      if (t?.type === 'track' && !t.is_local && t.is_playable !== false && TRACK_URI.test(t.uri || '')) { uris.add(t.uri); NAMES[t.uri] = t.name; }
+      if (t?.type === 'track' && !t.is_local && t.is_playable !== false && TRACK_URI.test(t.uri || '')) { uris.add(t.uri); NAMES[t.uri] = t.name; TRACKS[t.uri] = { y: (t.album?.release_date || '').slice(0, 4), a: (t.artists || []).map(x => x.id).filter(Boolean) }; }
     }
     say('Pobieram utwory: ' + uris.size + '…');
     url = typeof j.next === 'string' ? j.next : null;
@@ -248,7 +248,13 @@ async function play() {
     const all = await loadTracks($('pl').value);
     log('playlista: ' + all.length + ' poprawnych utworów');
     if (!all.length) throw new Error('Playlista jest pusta albo Spotify nie udostępnił jej utworów.');
-    const pick = shuffle(all).slice(0, Math.min(COUNT, 100));
+    let pool = all;
+    if (ANALYZED && ANALYZED.pid === $('pl').value && filtersActive()) {
+      pool = all.filter(matches);
+      log('filtry: pasuje ' + pool.length + ' z ' + all.length);
+      if (!pool.length) throw new Error('Żaden utwór nie pasuje do wybranych filtrów.');
+    }
+    const pick = shuffle(pool).slice(0, Math.min(COUNT, 100));
     if (!pick.length || pick.some(uri => !TRACK_URI.test(uri))) throw new Error('Nie znaleziono poprawnych URI utworów Spotify do odtworzenia.');
     const devices = await refreshDevices();
     const dev = devices.find(d => d.id === $('device').value);
@@ -299,7 +305,7 @@ async function play() {
     if (!used) throw new Error('Żadna metoda nie uruchomiła muzyki na „' + dev.name + '”. Kliknij „Kopiuj raport diagnostyczny” i wklej go Claude.');
     let queued = null;
     if (used.after) { try { queued = await used.after(); } catch (e) { log('  kolejka nieudana: ' + e.message); } }
-    say('Gra wylosowana kolejka' + (queued === null ? '' : ': pierwszy utwór + ' + queued + ' w kolejce Spotify') + ' (z ' + all.length + ' utworów w playliście, urządzenie: ' + dev.name + ').');
+    say('Gra wylosowana kolejka' + (queued === null ? '' : ': pierwszy utwór + ' + queued + ' w kolejce Spotify') + ' (losowanie z ' + pool.length + ' utworów, urządzenie: ' + dev.name + ').');
   } catch (e) { log('BŁĄD: ' + (e.status || '') + ' ' + (e.reason || '') + ' ' + e.message); say(errText(e)); }
   $('go').disabled = false;
 }
@@ -337,12 +343,146 @@ repBtn.onclick = async () => {
   catch { repBox.select(); say('Zaznacz tekst poniżej, skopiuj go i wklej w rozmowie z Claude.'); }
 };
 
+// ---------- Filtry: lata, gatunki, nastrój i tempo ----------
+const CACHE = (() => { try { return JSON.parse(localStorage.getItem('meta')) || { artists: {}, mood: {} }; } catch { return { artists: {}, mood: {} }; } })();
+const saveCache = () => { try { localStorage.setItem('meta', JSON.stringify(CACHE)); } catch (e) { log('cache nie zapisany: ' + e.message); } };
+const F = { dec: new Set(), gen: new Set(), energy: '', tempo: '' };
+let ANALYZED = null;   // { pid, uris, mood }
+const tid = u => u.split(':')[2];
+const decadeOf = y => y ? Math.floor(+y / 10) * 10 : null;
+const decadeLabel = d => d >= 2000 ? d + '–' + (d + 9) : 'lata ' + String(d).slice(2) + '.';
+const energyBucket = e => e < 0.45 ? 'spokojne' : e < 0.7 ? 'srednie' : 'energiczne';
+const tempoBucket = t => t < 100 ? 'wolne' : t < 130 ? 'srednie' : 'szybkie';
+const filtersActive = () => F.dec.size > 0 || F.gen.size > 0 || !!F.energy || !!F.tempo;
+
+function matches(u) {
+  const t = TRACKS[u];
+  if (!t) return false;
+  const m = CACHE.mood[tid(u)];
+  if (F.dec.size && !F.dec.has(decadeOf(t.y))) return false;
+  if (F.gen.size && !t.a.some(id => (CACHE.artists[id] || []).some(g => F.gen.has(g)))) return false;
+  if (F.energy && !(m && energyBucket(m.e) === F.energy)) return false;
+  if (F.tempo && !(m && tempoBucket(m.t) === F.tempo)) return false;
+  return true;
+}
+
+async function loadArtistGenres(ids) {
+  const todo = ids.filter(id => !(id in CACHE.artists));
+  for (let i = 0; i < todo.length; i += 5) {
+    say('Pobieram gatunki wykonawców: ' + i + '/' + todo.length + '…');
+    await Promise.all(todo.slice(i, i + 5).map(async id => {
+      try { CACHE.artists[id] = (await api('/artists/' + id))?.genres || []; }
+      catch (e) { log('  gatunki: błąd ' + (e.status || '') + ' dla ' + id + ' ' + e.message); }
+    }));
+  }
+  saveCache();
+}
+
+// Nastrój i tempo z ReccoBeats (darmowy serwis zewnętrzny, wysyła mu się identyfikatory utworów).
+async function loadMood(uris) {
+  const ids = uris.map(tid).filter(id => !(id in CACHE.mood));
+  let found = 0;
+  for (let i = 0; i < ids.length; i += 40) {
+    say('Pobieram nastrój i tempo: ' + i + '/' + ids.length + '…');
+    const chunk = ids.slice(i, i + 40);
+    try {
+      const r = await fetch('https://api.reccobeats.com/v1/audio-features?ids=' + chunk.join(','), { signal: AbortSignal.timeout(20000) });
+      log('ReccoBeats -> ' + r.status);
+      if (!r.ok) throw new Error('status ' + r.status);
+      const j = await r.json();
+      const arr = Array.isArray(j) ? j : (j.content || j.audio_features || []);
+      if (i === 0) log('  ReccoBeats pierwszy rekord: ' + JSON.stringify(arr[0] || null).slice(0, 300));
+      for (const f of arr) {
+        if (!f || typeof f.energy !== 'number') continue;
+        const m = /track\/([A-Za-z0-9]{22})/.exec(f.href || '');
+        const id = m ? m[1] : (typeof f.id === 'string' && f.id.length === 22 ? f.id : null);
+        if (id) { CACHE.mood[id] = { e: f.energy, t: f.tempo, v: f.valence }; found++; }
+      }
+      chunk.forEach(id => { if (!(id in CACHE.mood)) CACHE.mood[id] = null; });
+    } catch (e) { log('  ReccoBeats błąd: ' + e.message); return false; }
+  }
+  saveCache();
+  log('nastrój: nowych ' + found + ' z ' + ids.length + ' sprawdzonych');
+  return true;
+}
+
+async function analyze() {
+  $('anBtn').disabled = true;
+  log('--- analiza playlisty ---');
+  try {
+    const pid = $('pl').value;
+    say('Pobieram playlistę…');
+    const uris = await loadTracks(pid);
+    const artistIds = [...new Set(uris.flatMap(u => TRACKS[u].a))];
+    await loadArtistGenres(artistIds);
+    const mood = await loadMood(uris);
+    ANALYZED = { pid, uris, mood };
+    log('analiza: utworów ' + uris.length + ', wykonawców ' + artistIds.length + ', z rokiem ' + uris.filter(u => TRACKS[u].y).length +
+        ', z nastrojem ' + uris.filter(u => CACHE.mood[tid(u)]).length + ', ReccoBeats działa=' + mood);
+    renderFilters();
+    say(mood ? 'Gotowe. Wybierz filtry poniżej.' : 'Gotowe, ale serwis z nastrojem i tempem nie odpowiedział. Działają lata i gatunki.');
+  } catch (e) { log('BŁĄD analizy: ' + e.message); say(errText(e)); }
+  $('anBtn').disabled = false;
+}
+
+function renderFilters() {
+  const { uris, mood } = ANALYZED;
+  F.dec.clear(); F.gen.clear(); F.energy = ''; F.tempo = '';
+  const dec = {}, gen = {};
+  for (const u of uris) {
+    const t = TRACKS[u], d = decadeOf(t.y);
+    if (d) dec[d] = (dec[d] || 0) + 1;
+    new Set(t.a.flatMap(id => CACHE.artists[id] || [])).forEach(g => { gen[g] = (gen[g] || 0) + 1; });
+  }
+  const chk = (k, val, label, n) => `<label class="fl"><input type="checkbox" data-k="${k}" value="${esc(String(val))}"> ${esc(label)} <span>(${n})</span></label>`;
+  const decHtml = Object.keys(dec).map(Number).sort((a, b) => a - b).map(d => chk('dec', d, decadeLabel(d), dec[d])).join('') || '<em>brak danych o latach</em>';
+  const genKeys = Object.keys(gen).sort((a, b) => gen[b] - gen[a]);
+  const genHtml = genKeys.map(g => chk('gen', g, g, gen[g])).join('') || '<em>brak danych o gatunkach</em>';
+  const dis = mood ? '' : ' disabled';
+  $('fBody').innerHTML =
+    `<fieldset><legend>Lata</legend>${decHtml}</fieldset>` +
+    `<details><summary>Gatunki (${genKeys.length})</summary><div id="fGen">${genHtml}</div></details>` +
+    `<label for="fEnergy">Energia</label><select id="fEnergy"${dis}><option value="">Dowolna</option><option value="spokojne">Spokojne</option><option value="srednie">Średnie</option><option value="energiczne">Energiczne</option></select>` +
+    `<label for="fTempo">Tempo</label><select id="fTempo"${dis}><option value="">Dowolne</option><option value="wolne">Wolne (poniżej 100 BPM)</option><option value="srednie">Średnie (100–130)</option><option value="szybkie">Szybkie (powyżej 130)</option></select>` +
+    `<p id="fCount"></p>`;
+  $('fBody').hidden = false;
+  updateCount();
+}
+
+function updateCount() {
+  const n = ANALYZED.uris.filter(matches).length;
+  $('fCount').textContent = filtersActive() ? 'Pasuje ' + n + ' z ' + ANALYZED.uris.length + ' utworów.' : 'Bez filtrów losuję z całej playlisty (' + ANALYZED.uris.length + ' utworów).';
+}
+
+function resetFilters() {
+  ANALYZED = null;
+  F.dec.clear(); F.gen.clear(); F.energy = ''; F.tempo = '';
+  if ($('fBody')) { $('fBody').hidden = true; $('fBody').innerHTML = ''; }
+}
+
+const FP = document.createElement('div');
+FP.id = 'filters';
+FP.innerHTML = '<button id="anBtn">Analizuj playlistę (lata, gatunki, nastrój)</button><div id="fBody" hidden></div>';
+$('go').before(FP);
+$('anBtn').onclick = analyze;
+FP.onchange = e => {
+  const el = e.target;
+  if (el.dataset.k === 'dec') { el.checked ? F.dec.add(+el.value) : F.dec.delete(+el.value); }
+  else if (el.dataset.k === 'gen') { el.checked ? F.gen.add(el.value) : F.gen.delete(el.value); }
+  else if (el.id === 'fEnergy') F.energy = el.value;
+  else if (el.id === 'fTempo') F.tempo = el.value;
+  updateCount();
+};
+const st = document.createElement('style');
+st.textContent = '#filters{margin:0 0 1.25rem}#filters>button{margin-bottom:.75rem}#fBody fieldset,#fBody details{border:0;margin:0 0 1rem;padding:0}#fBody legend,#fBody summary{color:var(--mut,#a9b7d9);margin-bottom:.4rem;cursor:pointer}.fl{display:inline-flex;align-items:center;gap:.35rem;background:var(--card,#1f2f55);border-radius:999px;padding:.4rem .8rem;margin:0 .4rem .4rem 0}.fl span{opacity:.7}#fGen{max-height:12rem;overflow:auto}#fBody label[for]{display:block;margin-bottom:.4rem;color:var(--mut,#a9b7d9)}#fCount{color:var(--mut,#a9b7d9)}';
+document.head.append(st);
+
 $('loginBtn').onclick = login;
 $('go').onclick = play;
 $('refreshDevices').onclick = async () => {
   try { await refreshDevices(); say('Lista urządzeń została odświeżona.'); }
   catch (e) { say(errText(e)); }
 };
-$('pl').onchange = () => localStorage.setItem('last', $('pl').value);
+$('pl').onchange = () => { localStorage.setItem('last', $('pl').value); resetFilters(); };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 init();
