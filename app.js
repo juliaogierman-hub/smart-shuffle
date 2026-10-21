@@ -8,7 +8,7 @@ const TRACK_URI = /^spotify:track:[A-Za-z0-9]{22}$/;
 const $ = id => document.getElementById(id);
 const say = t => { $('msg').textContent = t; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const APP_VERSION = 'filtry+MusicBrainz v2';
+const APP_VERSION = 'filtry+MusicBrainz v3';
 const LOG = [], NAMES = {}, TRACKS = {};
 const log = m => { LOG.push(new Date().toISOString().slice(11, 23) + ' ' + m); if (LOG.length > 400) LOG.shift(); };
 window.addEventListener('error', e => log('BŁĄD STRONY: ' + e.message));
@@ -484,6 +484,8 @@ async function enrichMB() {
     }
     saveCache();
     log('MB: daty ' + uris.filter(u => CACHE.mb[tid(u)]?.y).length + '/' + uris.length + ', wykonawcy z gatunkami ' + Object.values(CACHE.mba).filter(g => g.length).length + '/' + Object.keys(CACHE.mba).length);
+    const miss = uris.filter(u => !CACHE.mb[tid(u)]?.y);
+    if (miss.length) log('MB bez dopasowania (' + miss.length + '): ' + miss.slice(0, 15).map(u => TRACKS[u].an + ' – ' + TRACKS[u].n).join(' | '));
     renderFilters();
     say('Gotowe: lata i gatunki poprawione na podstawie MusicBrainz.');
   } catch (e) {
