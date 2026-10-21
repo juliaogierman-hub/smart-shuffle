@@ -8,6 +8,7 @@ const TRACK_URI = /^spotify:track:[A-Za-z0-9]{22}$/;
 const $ = id => document.getElementById(id);
 const say = t => { $('msg').textContent = t; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const APP_VERSION = 'filtry+MusicBrainz v2';
 const LOG = [], NAMES = {}, TRACKS = {};
 const log = m => { LOG.push(new Date().toISOString().slice(11, 23) + ' ' + m); if (LOG.length > 400) LOG.shift(); };
 window.addEventListener('error', e => log('BŁĄD STRONY: ' + e.message));
@@ -330,14 +331,14 @@ async function init() {
 
 // ---------- Raport diagnostyczny (bez tokenów i haseł) ----------
 const repBtn = document.createElement('button');
-repBtn.textContent = 'Kopiuj raport diagnostyczny';
+repBtn.textContent = 'Kopiuj raport diagnostyczny (' + APP_VERSION + ')';
 repBtn.style.marginTop = '1rem';
 const repBox = document.createElement('textarea');
 repBox.readOnly = true; repBox.hidden = true; repBox.rows = 8;
 repBox.style.cssText = 'width:100%;margin-top:.75rem;font:12px/1.4 monospace;border-radius:10px;padding:.6rem';
 $('msg').after(repBtn, repBox);
 repBtn.onclick = async () => {
-  const text = 'Raport ' + new Date().toISOString() + '\n' + navigator.userAgent + '\n' + (LOG.join('\n') || '(brak wpisów)');
+  const text = 'Raport, wersja ' + APP_VERSION + ', ' + new Date().toISOString() + '\n' + navigator.userAgent + '\n' + (LOG.join('\n') || '(brak wpisów)');
   repBox.value = text; repBox.hidden = false;
   try { await navigator.clipboard.writeText(text); say('Raport skopiowany. Wklej go w rozmowie z Claude.'); }
   catch { repBox.select(); say('Zaznacz tekst poniżej, skopiuj go i wklej w rozmowie z Claude.'); }
