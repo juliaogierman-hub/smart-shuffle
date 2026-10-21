@@ -164,7 +164,7 @@ async function loadTracks(id) {
     if (!Array.isArray(j?.items)) throw new Error('Spotify nie zwrócił utworów playlisty w polu "items".');
     for (const it of j.items) {
       const t = it?.item || it?.track;        // po zmianach z 2026 pole nazywa się "item"
-      if (t?.type === 'track' && !t.is_local && t.is_playable !== false && TRACK_URI.test(t.uri || '')) { uris.add(t.uri); NAMES[t.uri] = t.name; TRACKS[t.uri] = { y: (t.album?.release_date || '').slice(0, 4), a: (t.artists || []).map(x => x.id).filter(Boolean) }; }
+      if (t?.type === 'track' && !t.is_local && t.is_playable !== false && TRACK_URI.test(t.uri || '')) { uris.add(t.uri); NAMES[t.uri] = t.name; TRACKS[t.uri] = { y: (t.album?.release_date || '').slice(0, 4), a: (t.artists || []).map(x => x.id).filter(Boolean), n: t.name || '', an: t.artists?.[0]?.name || '', al: t.album?.name || '', at: t.album?.album_type || '' }; }
     }
     say('Pobieram utwory: ' + uris.size + '…');
     url = typeof j.next === 'string' ? j.next : null;
@@ -346,6 +346,7 @@ repBtn.onclick = async () => {
 // ---------- Filtry: lata, gatunki, nastrój i tempo ----------
 const CACHE = (() => { try { return JSON.parse(localStorage.getItem('meta')) || { artists: {}, mood: {} }; } catch { return { artists: {}, mood: {} }; } })();
 const saveCache = () => { try { localStorage.setItem('meta', JSON.stringify(CACHE)); } catch (e) { log('cache nie zapisany: ' + e.message); } };
+CACHE.artists = CACHE.artists || {}; CACHE.mood = CACHE.mood || {}; CACHE.mb = CACHE.mb || {}; CACHE.mba = CACHE.mba || {};
 const F = { dec: new Set(), gen: new Set(), energy: '', tempo: '' };
 let ANALYZED = null;   // { pid, uris, mood }
 const tid = u => u.split(':')[2];
@@ -359,8 +360,8 @@ function matches(u) {
   const t = TRACKS[u];
   if (!t) return false;
   const m = CACHE.mood[tid(u)];
-  if (F.dec.size && !F.dec.has(decadeOf(t.y))) return false;
-  if (F.gen.size && !t.a.some(id => (CACHE.artists[id] || []).some(g => F.gen.has(g)))) return false;
+  if (F.dec.size && !F.dec.has(decadeOf(yearOf(u)))) return false;
+  if (F.gen.size && ![...genresOf(u)].some(g => F.gen.has(g))) return false;
   if (F.energy && !(m && energyBucket(m.e) === F.energy)) return false;
   if (F.tempo && !(m && tempoBucket(m.t) === F.tempo)) return false;
   return true;
@@ -406,6 +407,93 @@ async function loadMood(uris) {
   return true;
 }
 
+// ---------- MusicBrainz: pierwotna data wydania i gatunki (limit serwisu: 1 zapytanie/s) ----------
+const SUSPECT_ALBUM = /remaster|greatest|best of|collection|anthology|hits|essential|deluxe|live|edition|mono|stereo/i;
+function spotifyYear(u) {
+  const t = TRACKS[u];
+  return t && t.y && t.at === 'album' && !SUSPECT_ALBUM.test(t.al) ? t.y : null;
+}
+function yearOf(u) { const m = CACHE.mb[tid(u)]; return (m && m.y) || spotifyYear(u); }
+function genresOf(u) {
+  const t = TRACKS[u], out = new Set();
+  (t?.a || []).forEach(id => (CACHE.artists[id] || []).forEach(g => out.add(String(g).toLowerCase())));
+  (CACHE.mb[tid(u)]?.ar || []).forEach(id => (CACHE.mba[id] || []).forEach(g => out.add(g)));
+  return out;
+}
+
+let mbLast = 0;
+async function mbFetch(path) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const wait = 1100 - (Date.now() - mbLast);
+    if (wait > 0) await sleep(wait);
+    mbLast = Date.now();
+    const r = await fetch('https://musicbrainz.org/ws/2/' + path + (path.includes('?') ? '&' : '?') + 'fmt=json', { signal: AbortSignal.timeout(20000) });
+    if (r.status === 503 || r.status === 429) { log('  MusicBrainz ' + r.status + ', czekam'); await sleep(3000); continue; }
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('MusicBrainz ' + r.status);
+    return r.json();
+  }
+  throw new Error('MusicBrainz przeciążony');
+}
+
+const norm = x => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+const cleanTitle = n => n
+  .replace(/\s*[-–]\s*(\d{4}\s*)?(remaster|remastered|mono|stereo|single|radio|live|version|edit|mix|deluxe|bonus|from)\b.*$/i, '')
+  .replace(/\s*[\(\[][^)\]]*(remaster|mono|stereo|live|version|edit|mix|deluxe|bonus)[^)\]]*[\)\]]/ig, '')
+  .trim();
+const topGenres = arr => (arr || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 6).map(g => String(g.name).toLowerCase());
+
+// Szuka nagrania po tytule i wykonawcy i bierze NAJWCZEŚNIEJSZĄ datę (omija wersje „Remaster”).
+async function mbLookupTrack(u) {
+  const t = TRACKS[u], title = cleanTitle(t.n), artist = t.an;
+  if (!title || !artist) return null;
+  const q = 'recording:"' + title.replace(/["\\]/g, ' ') + '" AND artist:"' + artist.replace(/["\\]/g, ' ') + '"';
+  const j = await mbFetch('recording?limit=10&query=' + encodeURIComponent(q));
+  const nm = c => norm(c.name || c.artist?.name);
+  const ok = (j?.recordings || []).filter(r => {
+    const y = +String(r['first-release-date'] || '').slice(0, 4);
+    return (r.score || 0) >= 85 && y >= 1900 && y <= 2030 && norm(r.title) === norm(title) &&
+      (r['artist-credit'] || []).some(c => nm(c) && (nm(c).includes(norm(artist)) || norm(artist).includes(nm(c))));
+  });
+  if (!ok.length) return null;
+  ok.sort((a, b) => a['first-release-date'].localeCompare(b['first-release-date']));
+  const best = ok[0];
+  const cred = (best['artist-credit'] || []).find(c => nm(c) === norm(artist)) || (best['artist-credit'] || [])[0];
+  return { y: String(best['first-release-date']).slice(0, 4), ar: cred?.artist?.id ? [cred.artist.id] : [] };
+}
+
+async function enrichMB() {
+  $('mbBtn').disabled = true; $('anBtn').disabled = true;
+  log('--- MusicBrainz ---');
+  const uris = ANALYZED.uris;
+  try {
+    const todo = uris.filter(u => !(tid(u) in CACHE.mb));
+    for (let i = 0; i < todo.length; i++) {
+      say('MusicBrainz, utwory: ' + i + '/' + todo.length + ' (jeszcze ok. ' + Math.ceil((todo.length - i) * 1.2 / 60) + ' min). Nie zamykaj strony.');
+      try { CACHE.mb[tid(todo[i])] = await mbLookupTrack(todo[i]); }
+      catch (e) { if (/failed to fetch|load failed|networkerror/i.test(e.message)) throw e; log('  MB błąd: ' + e.message); }
+      if (i % 10 === 9) saveCache();
+    }
+    const mbids = [...new Set(uris.flatMap(u => CACHE.mb[tid(u)]?.ar || []))].filter(id => !(id in CACHE.mba));
+    for (let i = 0; i < mbids.length; i++) {
+      say('MusicBrainz, wykonawcy: ' + i + '/' + mbids.length + ' (jeszcze ok. ' + Math.ceil((mbids.length - i) * 1.2 / 60) + ' min).');
+      try { CACHE.mba[mbids[i]] = topGenres((await mbFetch('artist/' + mbids[i] + '?inc=genres'))?.genres); }
+      catch (e) { if (/failed to fetch|load failed|networkerror/i.test(e.message)) throw e; log('  MB wykonawca błąd: ' + e.message); }
+      if (i % 10 === 9) saveCache();
+    }
+    saveCache();
+    log('MB: daty ' + uris.filter(u => CACHE.mb[tid(u)]?.y).length + '/' + uris.length + ', wykonawcy z gatunkami ' + Object.values(CACHE.mba).filter(g => g.length).length + '/' + Object.keys(CACHE.mba).length);
+    renderFilters();
+    say('Gotowe: lata i gatunki poprawione na podstawie MusicBrainz.');
+  } catch (e) {
+    saveCache();
+    log('BŁĄD MusicBrainz: ' + e.message);
+    say('MusicBrainz nie odpowiada z tej przeglądarki (' + e.message + '). Zostają dane ze Spotify. Kliknij „Kopiuj raport”.');
+    if ($('mbBtn')) $('mbBtn').disabled = false;
+  }
+  $('anBtn').disabled = false;
+}
+
 async function analyze() {
   $('anBtn').disabled = true;
   log('--- analiza playlisty ---');
@@ -430,9 +518,9 @@ function renderFilters() {
   F.dec.clear(); F.gen.clear(); F.energy = ''; F.tempo = '';
   const dec = {}, gen = {};
   for (const u of uris) {
-    const t = TRACKS[u], d = decadeOf(t.y);
+    const d = decadeOf(yearOf(u));
     if (d) dec[d] = (dec[d] || 0) + 1;
-    new Set(t.a.flatMap(id => CACHE.artists[id] || [])).forEach(g => { gen[g] = (gen[g] || 0) + 1; });
+    genresOf(u).forEach(g => { gen[g] = (gen[g] || 0) + 1; });
   }
   const chk = (k, val, label, n) => `<label class="fl"><input type="checkbox" data-k="${k}" value="${esc(String(val))}"> ${esc(label)} <span>(${n})</span></label>`;
   const decHtml = Object.keys(dec).map(Number).sort((a, b) => a - b).map(d => chk('dec', d, decadeLabel(d), dec[d])).join('') || '<em>brak danych o latach</em>';
@@ -440,12 +528,14 @@ function renderFilters() {
   const genHtml = genKeys.map(g => chk('gen', g, g, gen[g])).join('') || '<em>brak danych o gatunkach</em>';
   const dis = mood ? '' : ' disabled';
   $('fBody').innerHTML =
-    `<fieldset><legend>Lata</legend>${decHtml}</fieldset>` +
+    `<button id="mbBtn">Popraw lata i gatunki (MusicBrainz, kilka minut)</button>` +
+    `<fieldset><legend>Lata (bez daty: ${uris.filter(u => !yearOf(u)).length})</legend>${decHtml}</fieldset>` +
     `<details><summary>Gatunki (${genKeys.length})</summary><div id="fGen">${genHtml}</div></details>` +
     `<label for="fEnergy">Energia</label><select id="fEnergy"${dis}><option value="">Dowolna</option><option value="spokojne">Spokojne</option><option value="srednie">Średnie</option><option value="energiczne">Energiczne</option></select>` +
     `<label for="fTempo">Tempo</label><select id="fTempo"${dis}><option value="">Dowolne</option><option value="wolne">Wolne (poniżej 100 BPM)</option><option value="srednie">Średnie (100–130)</option><option value="szybkie">Szybkie (powyżej 130)</option></select>` +
     `<p id="fCount"></p>`;
   $('fBody').hidden = false;
+  $('mbBtn').onclick = enrichMB;
   updateCount();
 }
 
